@@ -1,0 +1,16 @@
+version: "3"
+
+tasks:
+  run-master-test:
+    cmds:
+      - go run ./main/mrmaster.go test*.txt
+  run-master:
+    cmds:
+      - go run ./main/mrmaster.go pg-*.txt
+  run-worker:
+    deps: [compile-wc]
+    cmds:
+      - go run ./main/mrworker.go wc.so
+  compile-wc:
+    cmds:
+      - go build -buildmode=plugin ./mrapps/wc.go
