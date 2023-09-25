@@ -29,6 +29,7 @@ type JobType int
 const (
 	mapJob JobType = iota
 	reduceJob
+	doneJob
 )
 
 // Add your RPC definitions here.
@@ -36,6 +37,9 @@ const (
 type Args struct {
 	IntermediateFiles []string
 	Source            string
+	Job               JobType
+	ReducedFiles      []string
+	ReduceTask        int
 }
 
 type Reply struct {
@@ -44,6 +48,9 @@ type Reply struct {
 	Job         JobType
 	WorkerID    int
 	NReduce     int
+	MapJobDone  bool
+	ReduceFiles []string
+	ReduceTask  int
 }
 
 // Cook up a unique-ish UNIX-domain socket name

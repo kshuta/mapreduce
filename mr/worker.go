@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"log"
+	"log/slog"
 	"net/rpc"
 	"os"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -27,42 +28,76 @@ func ihash(key string) int {
 func Worker(
 	mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string,
+	log *slog.Logger,
 ) {
-	log.Println("invoking worker")
 	// Your worker implementation here.
 	// I need a worker ID.
 	workerID := 0
 
-	reply := CallGetWork()
-	if workerID == 0 {
-		workerID = reply.WorkerID
-	}
-	if reply.Job == mapJob {
-		intermediate := mapf(reply.FileName, string(reply.FileContent))
-		fileNames := make([]string, 0)
-		// encode intermediate values to json keypair
-		for _, kv := range intermediate {
-			reduceID := ihash(kv.Key) % reply.NReduce
-			fileName := fmt.Sprintf("mr-%d-%d.json", workerID, reduceID)
-			fileNames = append(fileNames, fileName)
-			file, err := os.OpenFile(fileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
-			if err != nil {
-				log.Println(err)
-				break
+	for {
+		reply := CallGetWork()
+		if workerID == 0 {
+			workerID = reply.WorkerID
+		}
+		log.Info("starting worker process", "workerID", workerID, "work", reply)
+		if reply.Job == mapJob {
+			intermediate := mapf(reply.FileName, string(reply.FileContent))
+			fileNames := make([]string, 0)
+			// encode intermediate values to json keypair
+			for _, kv := range intermediate {
+				reduceID := ihash(kv.Key) % reply.NReduce
+				fileName := fmt.Sprintf("mr-%d-%d.json", workerID, reduceID)
+				fileNames = append(fileNames, fileName)
+				file, err := os.OpenFile(fileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
+				if err != nil {
+					log.Error("failed to open intermediate file", "err", err)
+					break
+				}
+				enc := json.NewEncoder(file)
+				if err := enc.Encode(&kv); err != nil {
+					log.Error("failed to encode kv pair", "err", err)
+					break
+				}
 			}
-			enc := json.NewEncoder(file)
-			if err := enc.Encode(&kv); err != nil {
-				log.Println(err)
-				break
+
+			CallPutWork(Args{
+				IntermediateFiles: fileNames,
+				Source:            reply.FileName,
+			})
+		} else if reply.Job == reduceJob {
+			// wait until map job is done.
+			for !CallCheckMapJobs() {
+				// sleep
+				<-time.NewTimer(3 * time.Second).C
 			}
+
+			// do the reduce job.
+			// receive the specified files from master.
+			// read the contents of the files.
+			// sort
+			// perform reduce.
+			log.Info("running reduce", "reduceTask", reply.ReduceFiles)
+			args := Args{
+				ReduceTask:   reply.ReduceTask,
+				ReducedFiles: reply.ReduceFiles,
+				Job:          reduceJob,
+			}
+			CallPutWork(args)
+
+		} else {
+			break
 		}
 
-		CallPutWork(Args{
-			IntermediateFiles: fileNames,
-			Source:            reply.FileName,
-		})
+		time.Sleep(time.Second)
 	}
 
+}
+
+func CallCheckMapJobs() bool {
+	args := Args{}
+	reply := Reply{}
+	call("Master.GetMapJobStatus", &args, &reply)
+	return reply.MapJobDone
 }
 
 func CallPutWork(args Args) *Reply {
@@ -108,7 +143,8 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	sockname := masterSock()
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		slog.Error("error dialing socket", "err", err)
+		os.Exit(1)
 	}
 	defer c.Close()
 
@@ -117,6 +153,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
+	slog.Error("error calling rpc", "err", err.Error())
 	return false
 }
