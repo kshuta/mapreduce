@@ -13,6 +13,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"plugin"
 
@@ -27,7 +28,9 @@ func main() {
 
 	mapf, reducef := loadPlugin(os.Args[1])
 
-	mr.Worker(mapf, reducef)
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{AddSource: true}))
+
+	mr.Worker(mapf, reducef, logger)
 }
 
 // load the application Map and Reduce functions
