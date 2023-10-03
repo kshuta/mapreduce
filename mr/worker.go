@@ -42,8 +42,6 @@ func Worker(
 	reducef func(string, []string) string,
 	log *slog.Logger,
 ) {
-	// Your worker implementation here.
-	// I need a worker ID.
 	workerID := 0
 
 	for {
