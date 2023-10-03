@@ -4,11 +4,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log/slog"
 	"net/rpc"
 	"os"
+	"sort"
 	"time"
+
+	"golang.org/x/exp/maps"
 )
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
@@ -42,7 +54,7 @@ func Worker(
 		log.Info("starting worker process", "workerID", workerID, "work", reply)
 		if reply.Job == mapJob {
 			intermediate := mapf(reply.FileName, string(reply.FileContent))
-			fileNames := make([]string, 0)
+			fileNames := make([]string, 0) // make this into a set, so there are no duplicate files passed.
 			// encode intermediate values to json keypair
 			for _, kv := range intermediate {
 				reduceID := ihash(kv.Key) % reply.NReduce
@@ -74,12 +86,67 @@ func Worker(
 			// do the reduce job.
 			// receive the specified files from master.
 			// read the contents of the files.
+			kvs := make([]KeyValue, 0)
+			reducedFiles := make(map[string]bool)
+			for _, file := range reply.ReduceFiles {
+				if _, ok := reducedFiles[file]; ok {
+					continue
+				}
+				f, err := os.Open(file)
+				if err != nil {
+					log.Error("failed opening file to reduce", "err", err.Error())
+					break
+				}
+				dec := json.NewDecoder(f)
+				for {
+					log.Info("decoding json values", "filename", file)
+					var kv KeyValue
+					if err := dec.Decode(&kv); err == io.EOF {
+						break
+					} else if err != nil {
+						slog.Error("failed to decode json content", "err", err)
+						return
+					}
+					kvs = append(kvs, kv)
+				}
+				log.Info("finished decoding json values", "kvs", kvs)
+				f.Close()
+				reducedFiles[file] = true
+			}
+
 			// sort
+			sort.Sort(ByKey(kvs))
+
+			ofile, err := os.CreateTemp("", "tmp")
+			if err != nil {
+				slog.Error("err opening temp file", "err", err)
+			}
 			// perform reduce.
+			i := 0
+			for i < len(kvs) {
+				j := i + 1
+				for j < len(kvs) && kvs[j].Key == kvs[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, kvs[k].Value)
+				}
+				slog.Info("about to run reduce", "values", values)
+				output := reducef(kvs[i].Key, values)
+
+				slog.Info("writing to file", "key", kvs[i].Key, "output", output)
+				// write to file
+				fmt.Fprintf(ofile, "%v %v\n", kvs[i].Key, output)
+				i = j
+			}
+			ofile.Close()
+			os.Rename(ofile.Name(), fmt.Sprintf("mr-out-%d", reply.ReduceTask))
+
 			log.Info("running reduce", "reduceTask", reply.ReduceFiles)
 			args := Args{
 				ReduceTask:   reply.ReduceTask,
-				ReducedFiles: reply.ReduceFiles,
+				ReducedFiles: maps.Keys(reducedFiles),
 				Job:          reduceJob,
 			}
 			CallPutWork(args)
