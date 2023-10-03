@@ -27,9 +27,9 @@ type ExampleReply struct {
 type JobType int
 
 const (
-	mapJob JobType = iota
-	reduceJob
-	doneJob
+	MAP_JOB JobType = iota
+	REDUCE_JOB
+	DONE_JOB
 )
 
 // Add your RPC definitions here.

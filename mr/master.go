@@ -60,9 +60,9 @@ func (m *Master) GetWork(args *Args, reply *Reply) error {
 	m.workerID += 1
 	source, ok := <-m.mapJobChan
 	if ok {
-		reply.Job = mapJob
+		reply.Job = MAP_JOB
 		mapReply := new(MapJobReply)
-		slog.Info("getting work", "filename", source, "jobtype", mapJob)
+		slog.Info("getting work", "filename", source, "jobtype", MAP_JOB)
 		body, err := os.ReadFile(source)
 		if err != nil {
 			return err
@@ -93,7 +93,7 @@ func (m *Master) GetWork(args *Args, reply *Reply) error {
 	reduceTask, ok := <-m.reduceJobs
 	if ok {
 		reduceReply := new(ReduceJobReply)
-		slog.Info("getting work", "reduceTask", reduceTask, "jobtype", reduceJob)
+		slog.Info("getting work", "reduceTask", reduceTask, "jobtype", REDUCE_JOB)
 		reduceReply.ReduceFiles = m.intermediateFiles[reduceTask]
 		reduceReply.ReduceTask = reduceTask
 
@@ -113,14 +113,14 @@ func (m *Master) GetWork(args *Args, reply *Reply) error {
 		return nil
 	}
 
-	reply.Job = doneJob
+	reply.Job = DONE_JOB
 
 	return nil
 }
 
 func (m *Master) PutWork(args *Args, reply *Reply) error {
 	// retrieve reduce task number from worker, and store it for later use.
-	if args.Job == mapJob {
+	if args.Job == MAP_JOB {
 		slog.Info("putting work", "intermediateFiles", args.IntermediateFiles)
 		for _, file := range args.IntermediateFiles {
 			var taskNum int

@@ -131,7 +131,7 @@ func runReduceJob(reducef func(string, []string) string, workerID int, reply *Re
 	args := Args{
 		ReduceTask:   reply.ReduceTask,
 		ReducedFiles: maps.Keys(reducedFiles),
-		Job:          reduceJob,
+		Job:          REDUCE_JOB,
 	}
 	CallPutWork(args)
 
@@ -152,9 +152,9 @@ func Worker(
 		}
 
 		log.Info("starting worker process", "workerID", workerID, "work", reply)
-		if reply.Job == mapJob {
+		if reply.Job == MAP_JOB {
 			runMapJob(mapf, workerID, &reply.MapJobReply, log)
-		} else if reply.Job == reduceJob {
+		} else if reply.Job == REDUCE_JOB {
 			runReduceJob(reducef, workerID, &reply.ReduceJobReply, log)
 		} else {
 			break
