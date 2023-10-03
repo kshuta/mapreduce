@@ -36,6 +36,107 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+func runMapJob(mapf func(string, string) []KeyValue, workerID int, reply *MapJobReply, log *slog.Logger) {
+	intermediate := mapf(reply.FileName, string(reply.FileContent))
+	fileNames := make([]string, 0)
+	for _, kv := range intermediate {
+		reduceID := ihash(kv.Key) % reply.NReduce
+		fileName := fmt.Sprintf("mr-%d-%d.json", workerID, reduceID)
+		fileNames = append(fileNames, fileName)
+		file, err := os.OpenFile(fileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
+		if err != nil {
+			log.Error("failed to open intermediate file", "err", err)
+			break
+		}
+		enc := json.NewEncoder(file)
+		if err := enc.Encode(&kv); err != nil {
+			log.Error("failed to encode kv pair", "err", err)
+			break
+		}
+	}
+	CallPutWork(Args{
+		IntermediateFiles: fileNames,
+		Source:            reply.FileName,
+	})
+}
+
+func runReduceJob(reducef func(string, []string) string, workerID int, reply *ReduceJobReply, log *slog.Logger) {
+	// wait until map job is done.
+	for !CallCheckMapJobs() {
+		// sleep
+		<-time.NewTimer(3 * time.Second).C
+	}
+
+	// do the reduce job.
+	// receive the specified files from master.
+	// read the contents of the files.
+	kvs := make([]KeyValue, 0)
+	reducedFiles := make(map[string]bool)
+	for _, file := range reply.ReduceFiles {
+		if _, ok := reducedFiles[file]; ok {
+			continue
+		}
+		f, err := os.Open(file)
+		if err != nil {
+			log.Error("failed opening file to reduce", "err", err.Error())
+			break
+		}
+		dec := json.NewDecoder(f)
+		for {
+			log.Info("decoding json values", "filename", file)
+			var kv KeyValue
+			if err := dec.Decode(&kv); err == io.EOF {
+				break
+			} else if err != nil {
+				slog.Error("failed to decode json content", "err", err)
+				return
+			}
+			kvs = append(kvs, kv)
+		}
+		log.Info("finished decoding json values", "kvs", kvs)
+		f.Close()
+		reducedFiles[file] = true
+	}
+
+	// sort
+	sort.Sort(ByKey(kvs))
+
+	ofile, err := os.CreateTemp("", "tmp")
+	if err != nil {
+		slog.Error("err opening temp file", "err", err)
+	}
+	// perform reduce.
+	i := 0
+	for i < len(kvs) {
+		j := i + 1
+		for j < len(kvs) && kvs[j].Key == kvs[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, kvs[k].Value)
+		}
+		slog.Info("about to run reduce", "values", values)
+		output := reducef(kvs[i].Key, values)
+
+		slog.Info("writing to file", "key", kvs[i].Key, "output", output)
+		// write to file
+		fmt.Fprintf(ofile, "%v %v\n", kvs[i].Key, output)
+		i = j
+	}
+	ofile.Close()
+	os.Rename(ofile.Name(), fmt.Sprintf("mr-out-%d", reply.ReduceTask))
+
+	log.Info("running reduce", "reduceTask", reply.ReduceFiles)
+	args := Args{
+		ReduceTask:   reply.ReduceTask,
+		ReducedFiles: maps.Keys(reducedFiles),
+		Job:          reduceJob,
+	}
+	CallPutWork(args)
+
+}
+
 // main/mrworker.go calls this function.
 func Worker(
 	mapf func(string, string) []KeyValue,
@@ -44,111 +145,17 @@ func Worker(
 ) {
 	workerID := 0
 
-	for {
+	for { // wrap in loop so it will get more work once it's done with the current work.
 		reply := CallGetWork()
-		if workerID == 0 {
+		if workerID == 0 { // set worker id if it hasn't been set yet.
 			workerID = reply.WorkerID
 		}
+
 		log.Info("starting worker process", "workerID", workerID, "work", reply)
 		if reply.Job == mapJob {
-			intermediate := mapf(reply.FileName, string(reply.FileContent))
-			fileNames := make([]string, 0) // make this into a set, so there are no duplicate files passed.
-			// encode intermediate values to json keypair
-			for _, kv := range intermediate {
-				reduceID := ihash(kv.Key) % reply.NReduce
-				fileName := fmt.Sprintf("mr-%d-%d.json", workerID, reduceID)
-				fileNames = append(fileNames, fileName)
-				file, err := os.OpenFile(fileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
-				if err != nil {
-					log.Error("failed to open intermediate file", "err", err)
-					break
-				}
-				enc := json.NewEncoder(file)
-				if err := enc.Encode(&kv); err != nil {
-					log.Error("failed to encode kv pair", "err", err)
-					break
-				}
-			}
-
-			CallPutWork(Args{
-				IntermediateFiles: fileNames,
-				Source:            reply.FileName,
-			})
+			runMapJob(mapf, workerID, &reply.MapJobReply, log)
 		} else if reply.Job == reduceJob {
-			// wait until map job is done.
-			for !CallCheckMapJobs() {
-				// sleep
-				<-time.NewTimer(3 * time.Second).C
-			}
-
-			// do the reduce job.
-			// receive the specified files from master.
-			// read the contents of the files.
-			kvs := make([]KeyValue, 0)
-			reducedFiles := make(map[string]bool)
-			for _, file := range reply.ReduceFiles {
-				if _, ok := reducedFiles[file]; ok {
-					continue
-				}
-				f, err := os.Open(file)
-				if err != nil {
-					log.Error("failed opening file to reduce", "err", err.Error())
-					break
-				}
-				dec := json.NewDecoder(f)
-				for {
-					log.Info("decoding json values", "filename", file)
-					var kv KeyValue
-					if err := dec.Decode(&kv); err == io.EOF {
-						break
-					} else if err != nil {
-						slog.Error("failed to decode json content", "err", err)
-						return
-					}
-					kvs = append(kvs, kv)
-				}
-				log.Info("finished decoding json values", "kvs", kvs)
-				f.Close()
-				reducedFiles[file] = true
-			}
-
-			// sort
-			sort.Sort(ByKey(kvs))
-
-			ofile, err := os.CreateTemp("", "tmp")
-			if err != nil {
-				slog.Error("err opening temp file", "err", err)
-			}
-			// perform reduce.
-			i := 0
-			for i < len(kvs) {
-				j := i + 1
-				for j < len(kvs) && kvs[j].Key == kvs[i].Key {
-					j++
-				}
-				values := []string{}
-				for k := i; k < j; k++ {
-					values = append(values, kvs[k].Value)
-				}
-				slog.Info("about to run reduce", "values", values)
-				output := reducef(kvs[i].Key, values)
-
-				slog.Info("writing to file", "key", kvs[i].Key, "output", output)
-				// write to file
-				fmt.Fprintf(ofile, "%v %v\n", kvs[i].Key, output)
-				i = j
-			}
-			ofile.Close()
-			os.Rename(ofile.Name(), fmt.Sprintf("mr-out-%d", reply.ReduceTask))
-
-			log.Info("running reduce", "reduceTask", reply.ReduceFiles)
-			args := Args{
-				ReduceTask:   reply.ReduceTask,
-				ReducedFiles: maps.Keys(reducedFiles),
-				Job:          reduceJob,
-			}
-			CallPutWork(args)
-
+			runReduceJob(reducef, workerID, &reply.ReduceJobReply, log)
 		} else {
 			break
 		}
@@ -160,7 +167,7 @@ func Worker(
 
 func CallCheckMapJobs() bool {
 	args := Args{}
-	reply := Reply{}
+	reply := GetMapJobStatusReply{}
 	call("Master.GetMapJobStatus", &args, &reply)
 	return reply.MapJobDone
 }

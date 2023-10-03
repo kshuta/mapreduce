@@ -49,28 +49,28 @@ func (m *Master) reduceJobDone() bool {
 	return m.nReduce == len(m.reducedTask)
 }
 
-func (m *Master) GetMapJobStatus(args *Args, reply *Reply) error {
+func (m *Master) GetMapJobStatus(args *Args, reply *GetMapJobStatusReply) error {
 	reply.MapJobDone = m.mapJobDone()
 	return nil
 }
 
 func (m *Master) GetWork(args *Args, reply *Reply) error {
 
+	reply.WorkerID = m.workerID
+	m.workerID += 1
 	source, ok := <-m.mapJobChan
 	if ok {
+		reply.Job = mapJob
+		mapReply := new(MapJobReply)
 		slog.Info("getting work", "filename", source, "jobtype", mapJob)
 		body, err := os.ReadFile(source)
 		if err != nil {
 			return err
 		}
 
-		reply.FileContent = body
-		reply.FileName = source
-		reply.Job = mapJob
-		reply.WorkerID = m.workerID
-		reply.NReduce = m.nReduce
-
-		m.workerID += 1
+		mapReply.FileContent = body
+		mapReply.FileName = source
+		mapReply.NReduce = m.nReduce
 
 		go func(source string) {
 			timer := time.NewTimer(10 * time.Second)
@@ -85,17 +85,17 @@ func (m *Master) GetWork(args *Args, reply *Reply) error {
 				m.mappedFiles[source] = true
 			}
 		}(source)
+		reply.MapJobReply = *mapReply
 		return nil
 	}
 
 	// reduce phase
 	reduceTask, ok := <-m.reduceJobs
 	if ok {
+		reduceReply := new(ReduceJobReply)
 		slog.Info("getting work", "reduceTask", reduceTask, "jobtype", reduceJob)
-		reply.ReduceFiles = m.intermediateFiles[reduceTask]
-		reply.Job = reduceJob
-		reply.WorkerID = m.workerID
-		reply.ReduceTask = reduceTask
+		reduceReply.ReduceFiles = m.intermediateFiles[reduceTask]
+		reduceReply.ReduceTask = reduceTask
 
 		go func(reduceTask int) {
 			timer := time.NewTimer(10 * time.Second)
@@ -108,7 +108,8 @@ func (m *Master) GetWork(args *Args, reply *Reply) error {
 				m.reducedTask = append(m.reducedTask, reduceTask)
 			}
 		}(reduceTask)
-		m.workerID += 1
+
+		reply.ReduceJobReply = *reduceReply
 		return nil
 	}
 

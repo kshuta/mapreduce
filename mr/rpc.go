@@ -42,15 +42,26 @@ type Args struct {
 	ReduceTask        int
 }
 
-type Reply struct {
+type MapJobReply struct {
 	FileName    string
 	FileContent []byte
-	Job         JobType
-	WorkerID    int
 	NReduce     int
-	MapJobDone  bool
+}
+
+type ReduceJobReply struct {
 	ReduceFiles []string
 	ReduceTask  int
+}
+
+type Reply struct {
+	Job      JobType
+	WorkerID int
+	MapJobReply
+	ReduceJobReply
+}
+
+type GetMapJobStatusReply struct {
+	MapJobDone bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name
